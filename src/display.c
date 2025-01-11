@@ -606,8 +606,6 @@ int display_init(void)
         disp_path = "/arm-io/disp0";
 
     bool has_notch = false;
-    UNUSED(has_notch);
-
     int product = adt_path_offset(adt, "/product");
     if (product < 0) {
         printf("/product node not found!\n");
