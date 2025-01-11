@@ -173,8 +173,8 @@ TARGET_RAW := m1n1.bin
 
 DEPDIR := build/.deps
 
-.PHONY: all clean format invoke_cc always_rebuild
-all: build/$(TARGET) build/$(TARGET_RAW)
+.PHONY: all clean format update_tag update_cfg invoke_cc
+all: update_tag update_cfg build/$(TARGET) build/$(TARGET_RAW)
 clean:
 	rm -rf build/*
 format:
@@ -231,17 +231,20 @@ build/$(NAME).bin: build/$(NAME)-raw.elf
 	$(QUIET)echo "  RAW   $@"
 	$(QUIET)$(OBJCOPY) -O binary --strip-debug $< $@
 
-src/../build/build_tag.h: always_rebuild
+update_tag:
 	$(QUIET)mkdir -p build
 	$(QUIET)./version.sh > build/build_tag.tmp
 	$(QUIET)cmp -s build/build_tag.h build/build_tag.tmp 2>/dev/null || \
 	( mv -f build/build_tag.tmp build/build_tag.h && echo "  TAG   build/build_tag.h" )
 
-src/../build/build_cfg.h: always_rebuild
+update_cfg:
 	$(QUIET)mkdir -p build
 	$(QUIET)for i in $(CFG); do echo "#define $$i"; done > build/build_cfg.tmp
 	$(QUIET)cmp -s build/build_cfg.h build/build_cfg.tmp 2>/dev/null || \
 	( mv -f build/build_cfg.tmp build/build_cfg.h && echo "  CFG   build/build_cfg.h" )
+
+build/build_tag.h: update_tag
+build/build_cfg.h: update_cfg
 
 build/%.bin: data/%.bin
 	$(QUIET)echo "  IMG   $@"
