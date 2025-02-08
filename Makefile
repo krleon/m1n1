@@ -5,10 +5,12 @@ USE_CLANG ?= 1
 $(info INFO: Building on Darwin)
 ifeq ($(shell uname -p),arm)
 TOOLCHAIN ?= /opt/homebrew/opt/llvm/bin/
+TOOLCHAIN2 ?= /opt/homebrew/opt/lld/bin/
 else
 TOOLCHAIN ?= /usr/local/opt/llvm/bin/
 endif
 $(info INFO: Toolchain path: $(TOOLCHAIN))
+$(info INFO: LLD path: $(TOOLCHAIN2))
 endif
 
 ifeq ($(shell uname -m),aarch64)
@@ -20,14 +22,14 @@ endif
 ifeq ($(USE_CLANG),1)
 CC := $(TOOLCHAIN)clang --target=$(ARCH)
 AS := $(TOOLCHAIN)clang --target=$(ARCH)
-LD := $(TOOLCHAIN)ld.lld
+LD := $(TOOLCHAIN2)ld.lld
 OBJCOPY := $(TOOLCHAIN)llvm-objcopy
 CLANG_FORMAT ?= $(TOOLCHAIN)clang-format
 EXTRA_CFLAGS ?=
 else
 CC := $(TOOLCHAIN)$(ARCH)gcc
 AS := $(TOOLCHAIN)$(ARCH)gcc
-LD := $(TOOLCHAIN)$(ARCH)ld
+LD := $(TOOLCHAIN2)$(ARCH)ld
 OBJCOPY := $(TOOLCHAIN)$(ARCH)objcopy
 CLANG_FORMAT ?= clang-format
 EXTRA_CFLAGS ?= -Wstack-usage=2048

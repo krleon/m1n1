@@ -1,0 +1,1842 @@
+diff --git a/Makefile b/Makefile
+index 1b77954..dc4abc0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,6 +5,7 @@ USE_CLANG ?= 1
+ $(info INFO: Building on Darwin)
+ ifeq ($(shell uname -p),arm)
+ TOOLCHAIN ?= /opt/homebrew/opt/llvm/bin/
++TOOLCHAIN2 ?= /opt/homebrew/opt/lld/bin/
+ else
+ TOOLCHAIN ?= /usr/local/opt/llvm/bin/
+ endif
+@@ -20,14 +21,14 @@ endif
+ ifeq ($(USE_CLANG),1)
+ CC := $(TOOLCHAIN)clang --target=$(ARCH)
+ AS := $(TOOLCHAIN)clang --target=$(ARCH)
+-LD := $(TOOLCHAIN)ld.lld
++LD := $(TOOLCHAIN2)ld.lld
+ OBJCOPY := $(TOOLCHAIN)llvm-objcopy
+ CLANG_FORMAT ?= $(TOOLCHAIN)clang-format
+ EXTRA_CFLAGS ?=
+ else
+ CC := $(TOOLCHAIN)$(ARCH)gcc
+ AS := $(TOOLCHAIN)$(ARCH)gcc
+-LD := $(TOOLCHAIN)$(ARCH)ld
++LD := $(TOOLCHAIN2)$(ARCH)ld
+ OBJCOPY := $(TOOLCHAIN)$(ARCH)objcopy
+ CLANG_FORMAT ?= clang-format
+ EXTRA_CFLAGS ?= -Wstack-usage=2048
+@@ -95,7 +96,7 @@ OBJECTS := \
+ 	afk.o \
+ 	aic.o \
+ 	asc.o \
+-	bootlogo_128.o bootlogo_256.o \
++	bootlogo_48.o bootlogo_128.o bootlogo_256.o \
+ 	chainload.o \
+ 	chainload_asm.o \
+ 	chickens.o \
+@@ -108,7 +109,9 @@ OBJECTS := \
+ 	chickens_monsoon_mistral.o \
+ 	chickens_icestorm.o \
+ 	chickens_sawtooth.o \
++	chickens_tempset.o \
+ 	chickens_twister.o \
++	chickens_vortex.o \
+ 	clk.o \
+ 	cpufreq.o \
+ 	dapf.o \
+@@ -150,7 +153,7 @@ OBJECTS := \
+ 	tps6598x.o \
+ 	uart.o \
+ 	uartproxy.o \
+-	usb.o usb_dwc3.o \
++	usb.o usb_dwc3.o usb_dwc2.o \
+ 	utils.o utils_asm.o \
+ 	vsprintf.o \
+ 	wdt.o \
+@@ -263,6 +266,7 @@ build/%.bin: font/%.bin
+ 
+ build/main.o: build/build_tag.h build/build_cfg.h src/main.c
+ build/usb_dwc3.o: build/build_tag.h src/usb_dwc3.c
++build/usb_dwc2.o: build/build_tag.h src/usb_dwc2.c
+ build/chainload.o: build/build_cfg.h src/usb_dwc3.c
+ 
+ -include $(DEPDIR)/*
+diff --git a/data/makelogo.sh b/data/makelogo.sh
+index a860769..20dcffb 100755
+--- a/data/makelogo.sh
++++ b/data/makelogo.sh
+@@ -1,3 +1,4 @@
+ #!/usr/bin/env sh
++convert bootlogo_48.png -background black -flatten -depth 8 rgba:bootlogo_48.bin
+ convert bootlogo_128.png -background black -flatten -depth 8 rgba:bootlogo_128.bin
+ convert bootlogo_256.png -background black -flatten -depth 8 rgba:bootlogo_256.bin
+diff --git a/proxyclient/experiments/cpu_pstate_latencies.py b/proxyclient/experiments/cpu_pstate_latencies.py
+index 490c09d..7b5bf9d 100755
+--- a/proxyclient/experiments/cpu_pstate_latencies.py
++++ b/proxyclient/experiments/cpu_pstate_latencies.py
+@@ -7,23 +7,114 @@ from m1n1.setup import *
+ from m1n1 import asm
+ 
+ p.smp_start_secondaries()
++p.cpufreq_init()
++p.cpufreq_unrestrict_boost()
+ 
+ tfreq = u.mrs(CNTFRQ_EL0)
+ 
+-TEST_CPUS = [1, 4]
+-
+ CLUSTER_PSTATE = 0x20020
+ CLUSTER_STATUS = 0x20050
+ 
+ chip_id = u.adt["/chosen"].chip_id
+ 
+-if chip_id in (0x8103, 0x6000, 0x6001, 0x6002):
++if chip_id == 0x8960:
++    CREG = [
++        0x202200000
++    ]
++
++    MAX_PSTATE = [6]
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 7) << 22 | (reg & ~0x1c00000)
++
++elif chip_id == 0x7000:
++    CREG = [
++        0x202200000
++    ]
++
++    if u.adt.target_type == "N102":
++        MAX_PSTATE = [5]
++    else:
++        MAX_PSTATE = [6]
++
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 7) << 22 | (reg & ~0x1c00000)
++
++elif chip_id == 0x7001:
++    CREG = [
++        0x202200000
++    ]
++
++    MAX_PSTATE = [7]
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 7) << 22 | (reg & ~0x1c00000)
++
++elif chip_id in (0x8000, 0x8001, 0x8003):
++    CREG = [
++        0x202200000
++    ]
++
++    MAX_PSTATE = [8]
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 15) << 12 | (pstate & 15) | (reg & ~0xf00f)
++
++elif chip_id in (0x8010, 0x8012):
++    CREG = [
++        0x202f00000
++    ]
++
++    if u.adt.target_type == "N112":
++        MAX_PSTATE = [8]
++    else:
++        MAX_PSTATE = [11]
++
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 15) << 12 | (pstate & 15) | (reg & ~0xf00f)
++
++elif chip_id == 0x8011:
++    CREG = [
++        0x202f00000
++    ]
++
++    MAX_PSTATE = [10]
++    TEST_CPUS = [1]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 15) << 12 | (pstate & 15) | (reg & ~0xf00f)
++
++elif chip_id == 0x8015:
++    CREG = [
++        0x208e00000,
++        0x208e80000
++    ]
++
++    MAX_PSTATE = [7, 8]
++    TEST_CPUS = [1, 4]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 15) << 12 | (pstate & 15) | (reg & ~0xf00f)
++
++
++elif chip_id in (0x8103, 0x6000, 0x6001, 0x6002):
+     CREG = [
+         0x210e00000,
+         0x211e00000,
+     ]
+ 
+     MAX_PSTATE = [5, 15]
++    TEST_CPUS = [1, 4]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 15) << 12 | (pstate & 15) | (reg & ~0xf00f)
+ 
+ elif chip_id in (0x8121, 0x6020, 0x6021, 0x6022):
+     CREG = [
+@@ -36,6 +127,11 @@ elif chip_id in (0x8121, 0x6020, 0x6021, 0x6022):
+     else:
+         MAX_PSTATE = [7, 17]
+ 
++    TEST_CPUS = [1, 4]
++
++    def ps_to_cmd(reg, pstate):
++        return 1 << 25 | (pstate & 31) | (reg & ~0x1f)
++
+ code = u.malloc(0x1000)
+ 
+ util = asm.ARMAsm(f"""
+@@ -55,8 +151,8 @@ signal_and_write:
+     add x2, x2, #0x800
+ 1:
+     mrs x3, CNTPCT_EL0
+-    sub x4, x3, x2
+-    cbnz x4, 1b
++    cmp x3, x2
++    b.gt 1b
+     str x1, [x0]
+     mov x0, x3
+     ret
+@@ -98,11 +194,11 @@ def bench_cpu(idx, loops=10000000):
+     return mhz
+ 
+ def set_pstate(cluster, pstate):
+-    p.mask64(CREG[cluster] + CLUSTER_PSTATE, 0x1f01f, (1<<25) | pstate)
++    p.write64(CREG[cluster] + CLUSTER_PSTATE, ps_to_cmd(p.read64(CREG[cluster] + CLUSTER_PSTATE), pstate))
+ 
+ print()
+ 
+-LOG_ITERS = 10000
++LOG_ITERS = 30000
+ logbuf = u.malloc(LOG_ITERS * 16)
+ 
+ def bench_latency(cluster, cpu, from_pstate, to_pstate, verbose=False):
+@@ -110,7 +206,7 @@ def bench_latency(cluster, cpu, from_pstate, to_pstate, verbose=False):
+     bench_cpu(cpu)
+ 
+     p.smp_call(cpu, util.timelog, logbuf, LOG_ITERS)
+-    psreg = (p.read64(CREG[cluster] + CLUSTER_PSTATE) & ~0x1f01f) | (1<<25) | to_pstate
++    psreg = ps_to_cmd(p.read64(CREG[cluster] + CLUSTER_PSTATE), to_pstate)
+     tval = p.call(util.signal_and_write, CREG[cluster] + CLUSTER_PSTATE, psreg)
+     p.smp_wait(cpu)
+     
+@@ -166,6 +262,7 @@ def bench_latency(cluster, cpu, from_pstate, to_pstate, verbose=False):
+         print(f"Triggered at {tval}")
+ 
+     thresh = 2/ (1/f_init + 1/f_end)
++    inc = f_end > f_init
+ 
+     for i in range(tidx, LOG_ITERS - window - 1):
+         ts0, cyc0 = log[i - window]
+diff --git a/proxyclient/experiments/mmio_sweep.py b/proxyclient/experiments/mmio_sweep.py
+index 938ff29..7a4cd22 100755
+--- a/proxyclient/experiments/mmio_sweep.py
++++ b/proxyclient/experiments/mmio_sweep.py
+@@ -95,8 +95,10 @@ else:
+ 	maskrange = range(0x2_2000_0000, 0x3_0000_0000)
+ 
+ pd_did_enable = set()
+-pmgr = u.adt["/arm-io/pmgr"]
+-ps_dev_by_id = {dev.id: dev for dev in pmgr.devices}
++dt = u.adt["/arm-io/pmgr"]
++dt.pmgr_init()
++pmgr = dt["/arm-io/pmgr"]
++ps_dev_by_id = {dt.pmgr_dev_get_id(dev): dev for dev in pmgr.devices}
+ ps_deps = dict()
+ ps_addrs = dict()
+ 
+@@ -105,12 +107,12 @@ for dev in pmgr.devices:
+ 	addr = pmgr.get_reg(ps.reg)[0] + ps.offset + dev.psidx * 8
+ 
+ 	if lp.is_t6000() and dev.name.startswith("AOP_"):
+-		addr = 0x292284000 + (dev.id - 403) * 8		
++		addr = 0x292284000 + (dt.pmgr_dev_get_id(dev) - 403) * 8		
+ 
+ 	ps_addrs[dev.name] = addr
+ 	ps_deps[dev.name] = [
+ 		ps_dev_by_id[idx].name for idx
+-		in dev.parents if idx in ps_dev_by_id
++		in dt.pmgr_dev_get_parents(dev) if idx in ps_dev_by_id
+ 	]
+ 
+ if lp.is_t6000():
+diff --git a/proxyclient/m1n1/adt.py b/proxyclient/m1n1/adt.py
+index 9bdcedc..c303fa9 100644
+--- a/proxyclient/m1n1/adt.py
++++ b/proxyclient/m1n1/adt.py
+@@ -85,8 +85,15 @@ PMGRDevices = SafeGreedyRange(Struct(
+     "flags" / PMGRDeviceFlags,
+     "unk1_0" / Int8ul,
+     "unk1_1" / Int8ul,
+-    "unk1_2" / Int8ul,
+-    "parents" / Array(2, Int16ul),
++    "id1" / Int8ul,
++    "parents_un" / Union(0,
++        "u16id" / Struct("parents" / Array(2, Int16ul)),
++        "u8id" / Struct(
++            "parents" / Array(2, Int8ul),
++            "unk2_0" / Int8ul,
++            "unk2_1" / Int8ul,
++        ),
++    ),
+     "perf_idx" / Int8ul,
+     "perf_block" / Int8ul,
+     "psidx" / Int8ul,
+@@ -94,10 +101,10 @@ PMGRDevices = SafeGreedyRange(Struct(
+     "unk2_0" / Int16ul,
+     "pd" / Int8ul,
+     "ps_cfg16" / Int8ul,
+-    Const(0, Int32ul),
+-    Const(0, Int32ul),
++    "unkown1" / Int32ul,
++    "unkown2" / Int32ul,
+     "unk2_3" / Int16ul,
+-    "id" / Int16ul,
++    "id2" / Int16ul,
+     "unk3" / Int32ul,
+     "name" / PaddedString(16, "ascii")
+ ))
+@@ -347,11 +354,11 @@ DEV_PROPERTIES = {
+             "speaker-thiele-small": SpeakerThieleSmall,
+         },
+     },
+-    "apcie*": {
+-        "*": {
+-            "apcie-*-tunables": GreedyRange(TunableLocal),
+-        }
+-    },
++#    "apcie*": {
++#        "*": {
++#            "apcie-*-tunables": GreedyRange(TunableLocal),
++#        }
++#    },
+ }
+ 
+ def parse_prop(node, path, node_name, name, v, is_template=False):
+@@ -503,6 +510,7 @@ class ADTNode:
+         self._children = []
+         self._properties = {}
+         self._types = {}
++        self.pmgr_u8id = False
+         self._parent_path = path
+         self._parent = parent
+ 
+@@ -801,6 +809,24 @@ class ADTNode:
+         self[name] = node
+         return node
+ 
++    def pmgr_init(self):
++        for dev in self["/arm-io/pmgr"].devices:
++            if dev.id1:
++                self.pmgr_u8id = True
++                break
++
++    def pmgr_dev_get_id(self, dev):
++        if self.pmgr_u8id:
++            return dev.id1
++        else:
++            return dev.id2
++        
++    def pmgr_dev_get_parents(self, dev):
++        if self.pmgr_u8id:
++            return dev.parents_un.u8id.parents 
++        else:
++            return dev.parents_un.u16id.parents 
++
+ def load_adt(data):
+     return ADTNode(ADTNodeStruct.parse(data))
+ 
+diff --git a/proxyclient/m1n1/asm.py b/proxyclient/m1n1/asm.py
+index 0092d92..402a69b 100644
+--- a/proxyclient/m1n1/asm.py
++++ b/proxyclient/m1n1/asm.py
+@@ -30,7 +30,7 @@ toolchain = os.environ.get("TOOLCHAIN", TOOLCHAIN)
+ 
+ if use_clang:
+     CC = toolchain + "clang --target=%ARCH"
+-    LD = toolchain + "ld.lld"
++    LD = "/opt/homebrew/bin/ld.lld"
+     OBJCOPY = toolchain + "llvm-objcopy"
+     OBJDUMP = toolchain + "llvm-objdump"
+     NM = toolchain + "llvm-nm"
+diff --git a/proxyclient/m1n1/hv/__init__.py b/proxyclient/m1n1/hv/__init__.py
+index 1f223d9..f3258ea 100644
+--- a/proxyclient/m1n1/hv/__init__.py
++++ b/proxyclient/m1n1/hv/__init__.py
+@@ -1481,8 +1481,9 @@ class HV(Reloadable):
+         hook_devs = ["UART0", atc, atc_aon]
+ 
+         pmgr = self.adt["/arm-io/pmgr"]
++        self.adt.pmgr_init()
+         dev_by_name = {dev.name: dev for dev in pmgr.devices}
+-        dev_by_id = {dev.id: dev for dev in pmgr.devices}
++        dev_by_id = {dev.id2: dev for dev in pmgr.devices}
+ 
+         pmgr_hooks = []
+ 
+@@ -1491,7 +1492,7 @@ class HV(Reloadable):
+             if dev.psidx or dev.psreg:
+                 addr = pmgr.get_reg(ps.reg)[0] + ps.offset + dev.psidx * 8
+                 pmgr_hooks.append(addr)
+-                for idx in dev.parents:
++                for idx in self.adt.pmgr_dev_get_parents(dev):
+                     if idx in dev_by_id:
+                         hook_pmgr_dev(dev_by_id[idx])
+ 
+diff --git a/proxyclient/m1n1/hw/pmu.py b/proxyclient/m1n1/hw/pmu.py
+index b545df4..24d7741 100644
+--- a/proxyclient/m1n1/hw/pmu.py
++++ b/proxyclient/m1n1/hw/pmu.py
+@@ -10,19 +10,20 @@ class PMU:
+ 
+     def __init__(self, u, adt_path=None):
+         self.u = u
+-        if adt_path is None:
+-            adt_path = PMU.find_primary_pmu(u.adt)
++        #if adt_path is None:
++        #    adt_path = PMU.find_primary_pmu(u.adt)
+ 
+-        self.node = u.adt[adt_path]
+-        self.spmi = SPMI(u, adt_path.rpartition('/')[0])
+-        self.adt_path = adt_path
+-        self.primary = u.adt[adt_path].is_primary == 1
+-        self.reg = u.adt[adt_path].reg[0]
++        #self.node = u.adt[adt_path]
++        #self.spmi = SPMI(u, adt_path.rpartition('/')[0])
++        #self.adt_path = adt_path
++        #self.primary = u.adt[adt_path].is_primary == 1
++        #self.reg = u.adt[adt_path].reg[0]
+ 
+     def reset_panic_counter(self):
+-        if self.primary:
+-            leg_scrpad = self.node.info_leg__scrpad[0]
+-            self.spmi.write8(self.reg, leg_scrpad + 2, 0) # error counts
++        #if self.primary:
++        #    leg_scrpad = self.node.info_leg__scrpad[0]
++        #    self.spmi.write8(self.reg, leg_scrpad + 2, 0) # error counts
++        return
+ 
+     @staticmethod
+     def find_primary_pmu(adt):
+diff --git a/proxyclient/m1n1/proxy.py b/proxyclient/m1n1/proxy.py
+index 9a89fb6..c941994 100644
+--- a/proxyclient/m1n1/proxy.py
++++ b/proxyclient/m1n1/proxy.py
+@@ -642,6 +642,7 @@ class M1N1Proxy(Reloadable):
+     P_DAPF_INIT = 0x1201
+ 
+     P_CPUFREQ_INIT = 0x1300
++    P_CPUFREQ_UNRESTRICT_BOOST = 0x1301
+ 
+     def __init__(self, iface, debug=False):
+         self.debug = debug
+@@ -1142,6 +1143,9 @@ class M1N1Proxy(Reloadable):
+     def cpufreq_init(self):
+         return self.request(self.P_CPUFREQ_INIT)
+ 
++    def cpufreq_unrestrict_boost(self):
++        return self.request(self.P_CPUFREQ_UNRESTRICT_BOOST)
++
+ __all__.extend(k for k, v in globals().items()
+                if (callable(v) or isinstance(v, type)) and v.__module__ == __name__)
+ 
+diff --git a/proxyclient/tools/chainload.py b/proxyclient/tools/chainload.py
+index 2212513..9acb2f6 100755
+--- a/proxyclient/tools/chainload.py
++++ b/proxyclient/tools/chainload.py
+@@ -72,15 +72,15 @@ if not args.no_sepfw:
+         p.memcpy8(image_addr + preoslog_off, preoslog_start, preoslog_size)
+         u.adt["chosen"]["memory-map"].preoslog = (new_base + preoslog_off, preoslog_size)
+ 
+-for name in ("mtp", "aop"):
+-    if name in u.adt["/arm-io"]:
+-        iop = u.adt[f"/arm-io/{name}"]
+-        nub = u.adt[f"/arm-io/{name}/iop-{name}-nub"]
+-        if iop.segment_names.endswith(";__OS_LOG"):
+-            iop.segment_names = iop.segment_names[:-9]
+-            nub.segment_names = nub.segment_names[:-9]
+-            iop.segment_ranges = iop.segment_ranges[:-32]
+-            nub.segment_ranges = nub.segment_ranges[:-32]
++#for name in ("mtp", "aop"):
++#    if name in u.adt["/arm-io"]:
++#        iop = u.adt[f"/arm-io/{name}"]
++#        nub = u.adt[f"/arm-io/{name}/iop-{name}-nub"]
++#        if iop.segment_names.endswith(";__OS_LOG"):
++#            iop.segment_names = iop.segment_names[:-9]
++#            nub.segment_names = nub.segment_names[:-9]
++#            iop.segment_ranges = iop.segment_ranges[:-32]
++#            nub.segment_ranges = nub.segment_ranges[:-32]
+ 
+ print("Setting secondary CPU RVBARs...")
+ 
+diff --git a/proxyclient/tools/dump_pmgr.py b/proxyclient/tools/dump_pmgr.py
+index 7159349..39e3fd0 100755
+--- a/proxyclient/tools/dump_pmgr.py
++++ b/proxyclient/tools/dump_pmgr.py
+@@ -10,8 +10,9 @@ from m1n1.hw.nco import NCO
+ dt = u.adt
+ 
+ pmgr = dt["/arm-io/pmgr"]
++dt.pmgr_init()
+ 
+-dev_by_id = {dev.id: dev for dev in pmgr.devices}
++dev_by_id = {dt.pmgr_dev_get_id(dev): dev for dev in pmgr.devices}
+ pd_by_id = {pd.id: pd for pd in pmgr.power_domains}
+ clk_by_id = {clk.id: clk for clk in pmgr.clocks}
+ 
+@@ -47,8 +48,8 @@ print()
+ print("=== Devices ===")
+ for i, dev in enumerate(pmgr.devices):
+     flags = ", ".join(k for k in dev.flags if k[0] != "_" and dev.flags[k])
+-    s = f" #{i:3d} {dev.name:20s} id: {dev.id:3d} psreg: {dev.psreg:2d}:{dev.psidx:2d} "
+-    s += f" flags: {flags:24s} unk1_0: {dev.unk1_0} unk1_1: {dev.unk1_1} unk1_2: {dev.unk1_2} "
++    s = f" #{i:3d} {dev.name:20s} id: {dt.pmgr_dev_get_id(dev):3d} psreg: {dev.psreg:2d}:{dev.psidx:2d} "
++    s += f" flags: {flags:24s} unk1_0: {dev.unk1_0} unk1_1: {dev.unk1_1} id1: {dev.id1} "
+     s += f" perf_reg: {dev.perf_block}:{dev.perf_idx:#04x} unk3: {dev.unk3:3d} {dev.unk2_0:2d} {dev.ps_cfg16:2d} {dev.unk2_3:3d}"
+ 
+     if not dev.flags.no_ps:
+@@ -63,10 +64,10 @@ for i, dev in enumerate(pmgr.devices):
+         s += f" pd: {pd.name:20s}"
+     else:
+         s += "                         "
+-    if any(dev.parents):
+-        s += " parents: " + ", ".join(dev_by_id[idx].name if idx in dev_by_id else f"#{idx}" for idx in dev.parents if idx)
++    if any(dt.pmgr_dev_get_parents(dev)):
++        s += " parents: " + ", ".join(dev_by_id[idx].name if idx in dev_by_id else f"#{idx}" for idx in dt.pmgr_dev_get_parents(dev) if idx)
+     print(s)
+-    for i in dev_users.get(dev.id, []):
++    for i in dev_users.get(dt.pmgr_dev_get_id(dev), []):
+         print(f"  User: {i}")
+ 
+ print()
+@@ -108,31 +109,32 @@ for clk in range(256):
+ 
+ print()
+ print("=== Boot clocks ===")
+-for i, (freq, reg, nclk) in enumerate(zip(arm_io.clock_frequencies,
+-                                          arm_io.clock_frequencies_regs,
+-                                          arm_io.clock_frequencies_nclk)):
+-    v = ""
+-    clk_type = reg >> 56
+-    reg = reg & 0xFFFFFFFFFFFFFF
+-    
+-    if clk_type == 0x9c:
+-        v = f"fixed: {reg}"
+-    elif clk_type in (0xa0, 0xa1, 0xa4, 0xa5):
+-        v = f"regval: {p.read32(reg):#x}"
+-    elif clk_type == 0xa8:
+-        regvals = [p.read32(reg+off*4) for off in range(5)]
+-        try:
+-            # we are using the freq value from ADT as fin of NCO,
+-            # that's not exactly correct
+-            nco_freq = NCO.calc_rate(freq, regvals)
+-        except ValueError as e:
+-            nco_freq = 0
+-
+-        v = f"nco: (calculated rate: {nco_freq:d}) "
+-        for val in regvals:
+-            v += f"{val:#x} "
++if dt["/arm-io"].getprop("clock-frequencies-nclk"):
++    for i, (freq, reg, nclk) in enumerate(zip(arm_io.clock_frequencies,
++                                            arm_io.clock_frequencies_regs,
++                                            arm_io.clock_frequencies_nclk)):
++        v = ""
++        clk_type = reg >> 56
++        reg = reg & 0xFFFFFFFFFFFFFF
+         
+-    
+-    print(f"#{i:3}: {freq:10d} {nclk} {clk_type:#x}/{reg:#x}: {v}")
+-    for j in clock_users.get(i + 256, []):
+-        print(f"  User: {j}")
++        if clk_type == 0x9c:
++            v = f"fixed: {reg}"
++        elif clk_type in (0xa0, 0xa1, 0xa4, 0xa5):
++            v = f"regval: {p.read32(reg):#x}"
++        elif clk_type == 0xa8:
++            regvals = [p.read32(reg+off*4) for off in range(5)]
++            try:
++                # we are using the freq value from ADT as fin of NCO,
++                # that's not exactly correct
++                nco_freq = NCO.calc_rate(freq, regvals)
++            except ValueError as e:
++                nco_freq = 0
++
++            v = f"nco: (calculated rate: {nco_freq:d}) "
++            for val in regvals:
++                v += f"{val:#x} "
++            
++        
++        print(f"#{i:3}: {freq:10d} {nclk} {clk_type:#x}/{reg:#x}: {v}")
++        for j in clock_users.get(i + 256, []):
++            print(f"  User: {j}")
+diff --git a/proxyclient/tools/pmgr_adt2dt.py b/proxyclient/tools/pmgr_adt2dt.py
+index 6fcc2f2..84a43d7 100755
+--- a/proxyclient/tools/pmgr_adt2dt.py
++++ b/proxyclient/tools/pmgr_adt2dt.py
+@@ -15,10 +15,11 @@ args = parser.parse_args()
+ 
+ adt_data = args.input.read_bytes()
+ dt = adt.load_adt(adt_data)
++dt.pmgr_init()
+ 
+ pmgr = dt["/arm-io/pmgr"]
+ 
+-dev_by_id = {dev.id: dev for dev in pmgr.devices}
++dev_by_id = {dt.pmgr_dev_get_id(dev): dev for dev in pmgr.devices}
+ 
+ blocks = {}
+ maxaddr = {}
+@@ -79,13 +80,15 @@ for i, ((base, size), devices) in enumerate(sorted(blocks.items())):
+         print(f"\t\treg = <{offset:#x} 4>;")
+         print( "\t\t#power-domain-cells = <0>;")
+         print( "\t\t#reset-cells = <0>;")
+-        print(f'\t\tlabel = {die_label(dev.name.lower())};')
++        print(f'\t\tlabel = "{die_label(dev.name.lower())}";')
+         if dev.flags.critical:
+             print("\t\tapple,always-on;")
+ 
+-        if any(dev.parents):
+-            domains = [f"<&{die_node('ps_'+dev_by_id[idx].name.lower())}>" for idx in dev.parents if idx]
+-            print(f"\t\tpower-domains = {', '.join(domains)};")
++        parents = dt.pmgr_dev_get_parents(dev)
++        if any(parents):
++            domains = [f"<&{die_node('ps_'+dev_by_id[idx].name.lower())}>" for idx in parents if idx and len(dev_by_id) > idx]
++            if len(domains) > 0:
++                print(f"\t\tpower-domains = {', '.join(domains)};")
+ 
+         print( "\t};")
+     print( "};")
+diff --git a/src/chickens.c b/src/chickens.c
+index da132b7..f7edb64 100644
+--- a/src/chickens.c
++++ b/src/chickens.c
+@@ -56,6 +56,8 @@ void init_t8011_hurricane_zephyr(void);
+ void init_t8015_monsoon(void);
+ void init_t8015_mistral(void);
+ void init_t8015_monsoon(void);
++void init_common_vortex(void);
++void init_common_tempset(void);
+ void init_m1_icestorm(void);
+ void init_t8103_firestorm(int rev);
+ void init_t6000_firestorm(int rev);
+@@ -144,6 +146,16 @@ const char *init_cpu(void)
+             init_t8015_mistral();
+             break;
+ 
++        case MIDR_PART_T8027_VORTEX:
++            cpu = "A12X/Z Vortex";
++            init_common_vortex();
++            break;
++
++        case MIDR_PART_T8027_TEMPSET:
++            cpu = "A12X/Z Tempset";
++            init_common_tempset();
++            break;
++
+         case MIDR_PART_T8103_FIRESTORM:
+             cpu = "M1 Firestorm";
+             init_t8103_firestorm(rev);
+diff --git a/src/cpu_regs.h b/src/cpu_regs.h
+index 9fe3b9c..cbc135c 100644
+--- a/src/cpu_regs.h
++++ b/src/cpu_regs.h
+@@ -57,6 +57,7 @@
+ #define HID1_RCC_DIS_STALL_INACTIVE_MDR_CTL    BIT(21)
+ #define HID1_ZCL_RF_RESTART_THRESHOLD(x)       ((ULONG(x)) << 22)
+ #define HID1_ZCL_RF_RESTART_THRESHOLD_MASK     GENMASK(23, 22)
++#define HID1_RCC_FORCE_ALL_IEX_L3_CLKS_ON      BIT(23)
+ #define HID1_DIS_SPEC_MDSB_INVL_ROB_FLUSH      BIT(24)
+ #define HID1_DIS_LSP_FLUSH_WITH_CONTEXT_SWITCH BIT(25)
+ #define HID1_DIS_WFE                           BIT(26)
+@@ -151,6 +152,7 @@
+ #define EHID1_EN_LFSR                            BIT(63)
+ 
+ #define SYS_IMP_APL_HID3                                   sys_reg(3, 0, 15, 3, 0)
++#define HID3_DISABLE_COLOR_OPT                             BIT(2)
+ #define HID3_DISABLE_DC_ZVA_CMD_ONLY                       BIT(25)
+ #define HID3_DISABLE_ARBITER_FIX_BIF_CRD                   BIT(44)
+ #define HID3_DIS_XMON_SNP_EVICT_TRIGGER_L2_STARAVTION_MODE BIT(50)
+@@ -158,6 +160,10 @@
+ #define HID3_DEV_PCIE_THROTTLE_LIMIT(x)                    ((ULONG(x)) << 57)
+ #define HID3_DEV_PCIE_THROTTLE_ENABLE                      BIT(63)
+ 
++#define SYS_IMP_APL_EHID3             sys_reg(3, 0, 15, 3, 1)
++#define EHID3_DISABLE_COLOR_OPT       BIT(2)
++#define EHID3_DISABLE_DC_ZVA_CMD_ONLY BIT(25)
++
+ #define SYS_IMP_APL_HID4                                         sys_reg(3, 0, 15, 4, 0)
+ #define HID4_INV_CORE_CLK_OBS_TO_SOC                             BIT(0)
+ #define HID4_DISABLE_STNT_WIDGET                                 BIT(1)
+@@ -215,8 +221,6 @@
+ #define HID4_ENABLE_LFSR                                         BIT(63)
+ 
+ #define SYS_IMP_APL_EHID4                                         sys_reg(3, 0, 15, 4, 1)
+-#define SYS_IMP_APL_EHID3                                         sys_reg(3, 0, 15, 3, 1)
+-#define EHID3_DISABLE_DC_ZVA_CMD_ONLY                             BIT(25)
+ #define EHID4_DISABLE_HW_PREF_LD                                  BIT(0)
+ #define EHID4_DISABLE_HW_PREF_ST                                  BIT(1)
+ #define EHID4_DISABLE_SW_PRELOAD                                  BIT(2)
+@@ -316,16 +320,18 @@
+ #define EHID9_DEV_2_THROTTLE_LIMIT_MASK GENMASK(11, 6)
+ #define EHID9_DEV_2_THROTTLE_LIMIT(x)   ((ULONG(x)) << 6)
+ 
+-#define SYS_IMP_APL_HID10               sys_reg(3, 0, 15, 10, 0)
+-#define SYS_IMP_APL_EHID10              sys_reg(3, 0, 15, 10, 1)
+-#define HID10_FORCE_WAIT_STATE_DRAIN_UC BIT(32)
+-#define HID10_DISABLE_ZVA_TEMPORAL_TSO  BIT(49)
++#define SYS_IMP_APL_HID10                       sys_reg(3, 0, 15, 10, 0)
++#define SYS_IMP_APL_EHID10                      sys_reg(3, 0, 15, 10, 1)
++#define HID10_FORCE_WAIT_STATE_DRAIN_UC         BIT(32)
++#define HID10_DISABLE_ZVA_TEMPORAL_TSO          BIT(49)
++#define EHID10_DISABLE_RCC_PWR_SAVE_PRF_CLK_OFF BIT(19)
+ 
+-#define SYS_IMP_APL_HID11             sys_reg(3, 0, 15, 11, 0)
+-#define SYS_IMP_APL_HID11_LEGACY      sys_reg(3, 0, 15, 13, 0) /* A7-A9 */
+-#define HID11_DISABLE_FILL_C1_BUB_OPT BIT(7)
+-#define HID11_ENABLE_FIX_UC_55719865  BIT(15)
+-#define HID11_DISABLE_LD_NT_WIDGET    BIT(59)
++#define SYS_IMP_APL_HID11                  sys_reg(3, 0, 15, 11, 0)
++#define SYS_IMP_APL_HID11_LEGACY           sys_reg(3, 0, 15, 13, 0) /* A7-A9 */
++#define HID11_DISABLE_X64_NT_LAUNCH_OPTION BIT(1)
++#define HID11_DISABLE_FILL_C1_BUB_OPT      BIT(7)
++#define HID11_ENABLE_FIX_UC_55719865       BIT(15)
++#define HID11_DISABLE_LD_NT_WIDGET         BIT(59)
+ 
+ #define SYS_IMP_APL_EHID11           sys_reg(3, 0, 15, 11, 1)
+ #define EHID11_SMB_DRAIN_THRESH_MASK GENMASK(41, 40)
+@@ -495,6 +501,7 @@
+ 
+ #define L2C_ERR_STS_RECURSIVE_FAULT BIT(1)
+ #define L2C_ERR_STS_ACCESS_FAULT    BIT(7)
++#define L2C_ERR_STS_PIO_FAULT       BIT(9)
+ #define L2C_ERR_STS_ENABLE_W1C      BIT(56)
+ 
+ #define SYS_IMP_APL_L2C_ERR_ADR sys_reg(3, 3, 15, 9, 0)
+diff --git a/src/cpufreq.c b/src/cpufreq.c
+index 7dd33b2..9aed043 100644
+--- a/src/cpufreq.c
++++ b/src/cpufreq.c
+@@ -19,8 +19,13 @@
+ #define CLUSTER_PSTATE_DESIRED2               GENMASK(15, 12)
+ #define CLUSTER_PSTATE_APSC_BUSY              BIT(7)
+ #define CLUSTER_PSTATE_DESIRED1               GENMASK(4, 0)
++#define CLUSTER_PSTATE_DESIRED1_S5L8960X      GENMASK(24, 22)
+ 
+-#define CLUSTER_SWITCH_TIMEOUT 100
++#define PMGR_VOLTAGE_CTL_OFF_S5L8960X 0x20c00
++#define PMGR_VOLTAGE_CTL_OFF_T7000    0x23000
++#define PMGR_VOLTAGE_CTL_OFF_S8000    0xa0000
++
++#define CLUSTER_SWITCH_TIMEOUT 400
+ 
+ struct cluster_t {
+     const char *name;
+@@ -39,28 +44,107 @@ struct feat_t {
+     bool pcluster_only;
+ };
+ 
++static uint32_t get_target_pstate(const struct cluster_t *cluster)
++{
++    u64 val = read64(cluster->base + CLUSTER_PSTATE);
++
++    if (chip_id == S5L8960X || chip_id == T7000 || chip_id == T7001)
++        return FIELD_GET(CLUSTER_PSTATE_DESIRED1_S5L8960X, val);
++    else
++        return FIELD_GET(CLUSTER_PSTATE_DESIRED1, val);
++}
++
+ static int set_pstate(const struct cluster_t *cluster, uint32_t pstate)
+ {
+     u64 val = read64(cluster->base + CLUSTER_PSTATE);
+ 
+-    if (FIELD_GET(CLUSTER_PSTATE_DESIRED1, val) != pstate) {
+-        val &= ~CLUSTER_PSTATE_DESIRED1;
+-        val |= CLUSTER_PSTATE_SET | FIELD_PREP(CLUSTER_PSTATE_DESIRED1, pstate);
+-        if (chip_id == T8103 || chip_id <= T6002) {
++    if (get_target_pstate(cluster) != pstate) {
++        if (chip_id == S5L8960X || chip_id == T7000 || chip_id == T7001) {
++            val &= ~CLUSTER_PSTATE_DESIRED1_S5L8960X;
++            val |= CLUSTER_PSTATE_SET | FIELD_PREP(CLUSTER_PSTATE_DESIRED1_S5L8960X, pstate);
++        } else {
++            val &= ~CLUSTER_PSTATE_DESIRED1;
++            val |= CLUSTER_PSTATE_SET | FIELD_PREP(CLUSTER_PSTATE_DESIRED1, pstate);
++        }
++
++        if ((chip_id >= S8000 && chip_id <= T8103) || chip_id <= T6002) {
+             val &= ~CLUSTER_PSTATE_DESIRED2;
+             val |= CLUSTER_PSTATE_SET | FIELD_PREP(CLUSTER_PSTATE_DESIRED2, pstate);
+         }
++
+         write64(cluster->base + CLUSTER_PSTATE, val);
+-        if (poll32(cluster->base + CLUSTER_PSTATE, CLUSTER_PSTATE_BUSY, 0, CLUSTER_SWITCH_TIMEOUT) <
+-            0) {
+-            printf("cpufreq: Timed out waiting for cluster %s P-State switch\n", cluster->name);
+-            return -1;
+-        }
++    }
++
++    if (poll64(cluster->base + CLUSTER_PSTATE, CLUSTER_PSTATE_BUSY, 0, CLUSTER_SWITCH_TIMEOUT) <
++        0) {
++        printf("cpufreq: Timed out waiting for cluster %s P-State switch\n", cluster->name);
++        return -1;
+     }
+ 
+     return 0;
+ }
+ 
++// PSINFO: holds the frequency, voltage and boost information for each P-State
++// state 0 - 7, PSINFO1
++#define CLUSTER_PSINFO1_OFF_S5L8960X 0x20068
++// state 8 - 15, PSINFO1
++#define CLUSTER_PSINFO1_EXT_OFF_S8000 0x20368
++// state 0 - 15, PSINFO2
++#define CLUSTER_PSINFO2_OFF_S8000 0x20868
++
++// NOTE: state 8 - 15 is only available on S800X
++#define CLUSTER_PSINFO1_S5L8960X(pstate)                                                           \
++    ((pstate >= 8) ? (CLUSTER_PSINFO1_EXT_OFF_S8000 + (pstate - 8) * 8)                            \
++                   : (CLUSTER_PSINFO1_OFF_S5L8960X + (pstate * 8)))
++#define CLUSTER_PSINFO2_S8000(pstate) (CLUSTER_PSINFO2_OFF_S8000 + (pstate * 8))
++
++// Starting from T8010 it's much saner with all the PSINFO's in strides
++#define CLUSTER_PSINFO_STRIDE_T8010 0x20
++
++#define CLUSTER_PSINFO_OFF_T8010 0x80000
++#define CLUSTER_PSINFO_OFF_T8015 0x70000
++
++#define CLUSTER_PSINFO1_T8010(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8010 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++#define CLUSTER_PSINFO2_T8010(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8010 + 8 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++#define CLUSTER_PSINFO3_T8010(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8010 + 0x10 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++
++#define CLUSTER_PSINFO1_T8015(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8015 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++#define CLUSTER_PSINFO2_T8015(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8015 + 8 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++#define CLUSTER_PSINFO3_T8015(pstate)                                                              \
++    (CLUSTER_PSINFO_OFF_T8015 + 0x10 + (pstate * CLUSTER_PSINFO_STRIDE_T8010))
++
++#define CLUSTER_PSINFO_MAX_LOAD GENMASK(43, 40)
++
++/*
++ * This function will unrestrict the boost modes for the cluster.
++ * However, only use this function for testing the state transistions
++ * as it puts the CPU in an untested configuration.
++ */
++void cpufreq_unrestrict_boost_cluster(const struct cluster_t *cluster)
++{
++    // Set max load to 15. This will allow us to enter said state without restrictions
++    if (chip_id == S8000 || chip_id == S8001 || chip_id == S8003) {
++        set64(cluster->base + CLUSTER_PSINFO2_S8000(8), FIELD_PREP(CLUSTER_PSINFO_MAX_LOAD, 15));
++        // board id 0x16: iPod touch 7
++    } else if ((chip_id == T8010 && board_id != 0x16) || chip_id == T8012) {
++        set64(cluster->base + CLUSTER_PSINFO2_T8010(11), FIELD_PREP(CLUSTER_PSINFO_MAX_LOAD, 15));
++    } else if (chip_id == T8011) {
++        set64(cluster->base + CLUSTER_PSINFO2_T8010(10), FIELD_PREP(CLUSTER_PSINFO_MAX_LOAD, 15));
++    } else if (chip_id == T8015) {
++        if (cluster->pcluster)
++            set64(cluster->base + CLUSTER_PSINFO2_T8015(8),
++                  FIELD_PREP(CLUSTER_PSINFO_MAX_LOAD, 15));
++        else
++            set64(cluster->base + CLUSTER_PSINFO2_T8015(7),
++                  FIELD_PREP(CLUSTER_PSINFO_MAX_LOAD, 15));
++    }
++}
++
+ int cpufreq_init_cluster(const struct cluster_t *cluster, const struct feat_t *features)
+ {
+     /* Reset P-State to the APSC p-state */
+@@ -89,11 +173,46 @@ int cpufreq_init_cluster(const struct cluster_t *cluster, const struct feat_t *f
+     }
+ 
+     /* Unknown */
+-    write64(cluster->base + 0x440f8, 1);
++    if ((chip_id > T8015 && chip_id < S5L8960X) || chip_id < T7000)
++        write64(cluster->base + 0x440f8, 1);
++
++    int pmgr_path[8];
++    u64 pmgr_reg;
++
++    if (adt_path_offset_trace(adt, "/arm-io/pmgr", pmgr_path) < 0) {
++        printf("Error getting /arm-io/pmgr node\n");
++        return -1;
++    }
++
++    if (adt_get_reg(adt, pmgr_path, "reg", 0, &pmgr_reg, NULL) < 0) {
++        printf("Error getting /arm-io/pmgr regs\n");
++        return -1;
++    }
+ 
+     /* Initialize APSC */
+     set64(cluster->base + 0x200f8, BIT(40));
++
++    /* A7 - A11: Enable voltage controls */
+     switch (chip_id) {
++        case S5L8960X: {
++            write32(pmgr_reg + PMGR_VOLTAGE_CTL_OFF_S5L8960X, 1);
++            break;
++        }
++        case T7000:
++        case T7001: {
++            write32(pmgr_reg + PMGR_VOLTAGE_CTL_OFF_T7000, 1);
++            break;
++        }
++        case S8000:
++        case S8001:
++        case S8003:
++        case T8010:
++        case T8011:
++        case T8012:
++        case T8015: {
++            write32(pmgr_reg + PMGR_VOLTAGE_CTL_OFF_S8000, 1);
++            break;
++        }
+         case T8103: {
+             u64 lo = read64(cluster->base + 0x70000 + cluster->apsc_pstate * 0x20);
+             u64 hi = read64(cluster->base + 0x70008 + cluster->apsc_pstate * 0x20);
+@@ -148,6 +267,42 @@ void cpufreq_fixup_cluster(const struct cluster_t *cluster)
+     }
+ }
+ 
++static const struct cluster_t s5l8960x_clusters[] = {
++    {"CPU", 0x202200000, false, 2, 6},
++    {},
++};
++
++static const struct cluster_t t7000_clusters[] = {
++    {"CPU", 0x202200000, false, 2, 5},
++    {},
++};
++
++static const struct cluster_t t7001_clusters[] = {
++    {"CPU", 0x202200000, false, 2, 7},
++    {},
++};
++
++static const struct cluster_t s8000_clusters[] = {
++    {"CPU", 0x202200000, false, 2, 7},
++    {},
++};
++
++static const struct cluster_t t8010_clusters[] = {
++    {"CPU", 0x202f00000, false, 2, 4},
++    {},
++};
++
++static const struct cluster_t t8012_clusters[] = {
++    {"CPU", 0x202f00000, false, 6, 10},
++    {},
++};
++
++static const struct cluster_t t8015_clusters[] = {
++    {"ECPU", 0x208e00000, false, 2, 6},
++    {"PCPU", 0x208e80000, true, 2, 7},
++    {},
++};
++
+ static const struct cluster_t t8103_clusters[] = {
+     {"ECPU", 0x210e00000, false, 1, 5},
+     {"PCPU", 0x211e00000, true, 1, 7},
+@@ -203,6 +358,23 @@ static const struct cluster_t t6031_clusters[] = {
+ const struct cluster_t *cpufreq_get_clusters(void)
+ {
+     switch (chip_id) {
++        case S5L8960X:
++            return s5l8960x_clusters;
++        case T7000:
++            return t7000_clusters;
++        case T7001:
++            return t7001_clusters;
++        case S8000:
++        case S8001:
++        case S8003:
++            return s8000_clusters;
++        case T8010:
++        case T8011:
++            return t8010_clusters;
++        case T8012:
++            return t8012_clusters;
++        case T8015:
++            return t8015_clusters;
+         case T8103:
+             return t8103_clusters;
+         case T6000:
+@@ -225,6 +397,27 @@ const struct cluster_t *cpufreq_get_clusters(void)
+     }
+ }
+ 
++static const struct feat_t s5l8960x_features[] = {
++    {},
++};
++
++static const struct feat_t s8000_features[] = {
++    {"cpu-apsc", CLUSTER_PSTATE, CLUSTER_PSTATE_M1_APSC_DIS, 0, CLUSTER_PSTATE_APSC_BUSY, false},
++    {},
++};
++
++static const struct feat_t t8010_features[] = {
++    {"cpu-apsc", CLUSTER_PSTATE, CLUSTER_PSTATE_M1_APSC_DIS, 0, CLUSTER_PSTATE_APSC_BUSY, false},
++    {},
++};
++
++static const struct feat_t t8015_features[] = {
++    {"cpu-apsc", CLUSTER_PSTATE, CLUSTER_PSTATE_M1_APSC_DIS, 0, CLUSTER_PSTATE_APSC_BUSY, false},
++    {"cpu-fixed-freq-pll-relock", CLUSTER_PSTATE, 0, CLUSTER_PSTATE_FIXED_FREQ_PLL_RECLOCK, 0,
++     false},
++    {},
++};
++
+ static const struct feat_t t8103_features[] = {
+     {"cpu-apsc", CLUSTER_PSTATE, CLUSTER_PSTATE_M1_APSC_DIS, 0, CLUSTER_PSTATE_APSC_BUSY, false},
+     {"ppt-thrtl", 0x48400, 0, BIT(63), 0, false},
+@@ -271,6 +464,20 @@ static const struct feat_t t6031_features[] = {
+ const struct feat_t *cpufreq_get_features(void)
+ {
+     switch (chip_id) {
++        case S5L8960X:
++        case T7000:
++        case T7001:
++            return s5l8960x_features;
++        case S8000:
++        case S8001:
++        case S8003:
++            return s8000_features;
++        case T8010:
++        case T8011:
++        case T8012:
++            return t8010_features;
++        case T8015:
++            return t8015_features;
+         case T8103:
+         case T6000 ... T6002:
+             return t8103_features;
+@@ -298,6 +505,10 @@ int cpufreq_init(void)
+     if (!cluster || !features)
+         return -1;
+ 
++    /* Without this, CLUSTER_PSTATE_BUSY gets stuck */
++    if (chip_id == T8012 || chip_id == T8015)
++        pmgr_power_on(0, "SPMI");
++
+     bool err = false;
+     while (cluster->base) {
+         err |= cpufreq_init_cluster(cluster++, features);
+@@ -317,3 +528,15 @@ void cpufreq_fixup(void)
+         cpufreq_fixup_cluster(cluster++);
+     }
+ }
++
++void cpufreq_unrestrict_boost(void)
++{
++    const struct cluster_t *cluster = cpufreq_get_clusters();
++
++    if (!cluster)
++        return;
++
++    while (cluster->base) {
++        cpufreq_unrestrict_boost_cluster(cluster++);
++    }
++}
+diff --git a/src/cpufreq.h b/src/cpufreq.h
+index 3c0df87..0e411cb 100644
+--- a/src/cpufreq.h
++++ b/src/cpufreq.h
+@@ -5,5 +5,6 @@
+ 
+ int cpufreq_init(void);
+ void cpufreq_fixup(void);
++void cpufreq_unrestrict_boost(void);
+ 
+ #endif
+diff --git a/src/exception.c b/src/exception.c
+index 5c01dee..3d49ebf 100644
+--- a/src/exception.c
++++ b/src/exception.c
+@@ -217,7 +217,8 @@ void print_regs(u64 *regs, int el12)
+     printf("L2C_ERR_STS: 0x%lx\n", sts);
+     printf("L2C_ERR_ADR: 0x%lx\n", mrs(SYS_IMP_APL_L2C_ERR_ADR));
+     printf("L2C_ERR_INF: 0x%lx\n", mrs(SYS_IMP_APL_L2C_ERR_INF));
+-    msr(SYS_IMP_APL_L2C_ERR_STS, sts);
++
++    reg_mask(SYS_IMP_APL_L2C_ERR_STS, L2C_ERR_STS_ACCESS_FAULT | L2C_ERR_STS_PIO_FAULT, 0);
+ 
+     if (is_ecore()) {
+         printf("E_LSU_ERR_STS: 0x%lx\n", mrs(SYS_IMP_APL_E_LSU_ERR_STS));
+@@ -300,8 +301,8 @@ void exc_sync(u64 *regs)
+     if (!(exc_guard & GUARD_SILENT))
+         print_regs(regs, el12);
+ 
+-    u64 l2c_err_sts = mrs(SYS_IMP_APL_L2C_ERR_STS);
+-    msr(SYS_IMP_APL_L2C_ERR_STS, l2c_err_sts); // Clear the L2C_ERR flag bits
++    // Clear the L2C_ERR flag bits
++    reg_mask(SYS_IMP_APL_L2C_ERR_STS, L2C_ERR_STS_ACCESS_FAULT | L2C_ERR_STS_PIO_FAULT, 0);
+ 
+     switch (exc_guard & GUARD_TYPE_MASK) {
+         case GUARD_SKIP:
+diff --git a/src/fb.c b/src/fb.c
+index 8a3c317..32f7d6f 100644
+--- a/src/fb.c
++++ b/src/fb.c
+@@ -44,12 +44,19 @@ static struct {
+     bool active;
+ } console;
+ 
++extern u8 _binary_build_bootlogo_48_bin_start[];
+ extern u8 _binary_build_bootlogo_128_bin_start[];
+ extern u8 _binary_build_bootlogo_256_bin_start[];
+ 
+ extern u8 _binary_build_font_bin_start[];
+ extern u8 _binary_build_font_retina_bin_start[];
+ 
++const struct image logo_48 = {
++    .ptr = (void *)_binary_build_bootlogo_48_bin_start,
++    .width = 48,
++    .height = 48,
++};
++
+ const struct image logo_128 = {
+     .ptr = (void *)_binary_build_bootlogo_128_bin_start,
+     .width = 128,
+@@ -409,7 +416,13 @@ void fb_init(bool clear)
+     fb.ptr = malloc(fb.size);
+     memcpy(fb.ptr, fb.hwptr, fb.size);
+ 
+-    if (cur_boot_args.video.depth & FB_DEPTH_FLAG_RETINA) {
++    // This is the touchbar, make everything tiny
++    if (chip_id == T8012) {
++        logo = &logo_48;
++        console.font.ptr = _binary_build_font_bin_start;
++        console.font.width = 8;
++        console.font.height = 16;
++    } else if (cur_boot_args.video.depth & FB_DEPTH_FLAG_RETINA) {
+         logo = &logo_256;
+         console.font.ptr = _binary_build_font_retina_bin_start;
+         console.font.width = 16;
+diff --git a/src/kboot.c b/src/kboot.c
+index 1a46a77..fbe146f 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -204,7 +204,8 @@ static int dt_set_chosen(void)
+         printf("FDT: initrd at %p size 0x%lx\n", initrd_start, initrd_size);
+     }
+ 
+-    if (cur_boot_args.video.base) {
++    if (cur_boot_args.video.base &&
++        (adt_path_offset(adt, "/arm-io/disp0") > 0 || (chip_id != T8012 && chip_id != T7000))) {
+         int fb = fdt_path_offset(dt, "/chosen/framebuffer");
+         if (fb < 0)
+             bail("FDT: /chosen node not found in devtree\n");
+@@ -335,8 +336,26 @@ static int dt_set_memory(void)
+     if (node < 0)
+         bail("FDT: /memory node not found in devtree\n");
+ 
+-    if (fdt_setprop(dt, node, "reg", memreg, sizeof(memreg)))
+-        bail("FDT: couldn't set memory.reg property\n");
++    if (chip_id == T8012) {
++        u64 cache_min = ALIGN_UP(dram_max, BIT(29));
++        u64 cache_max = dram_base + dram_size;
++
++        /*
++         * Set the SSD cache as OS memory, supposedly we will deal with the x86 SSD interface with a
++         * kernel driver that allocates memory anyways
++         */
++        u64 memreg_t2[4] = {memreg[0], memreg[1], cpu_to_fdt64(cache_min),
++                            cpu_to_fdt64(cache_max - cache_min)};
++
++        printf("FDT: Usable memory range 2 (SSD cache): 0x%lx..0x%lx (0x%lx)\n", cache_min,
++               cache_max, cache_max - cache_min);
++
++        if (fdt_setprop(dt, node, "reg", memreg_t2, sizeof(memreg_t2)))
++            bail("FDT: couldn't set memory.reg property\n");
++    } else {
++        if (fdt_setprop(dt, node, "reg", memreg, sizeof(memreg)))
++            bail("FDT: couldn't set memory.reg property\n");
++    }
+ 
+     return 0;
+ }
+@@ -822,8 +841,13 @@ static int dt_set_wifi(void)
+     }
+ 
+     uint8_t info[16];
+-    if (ADT_GETPROP_ARRAY(adt, anode, "wifi-antenna-sku-info", info) < 0)
++    if (ADT_GETPROP_ARRAY(adt, anode, "wifi-antenna-sku-info", info) < 0) {
++        // DTK is weird, it is only one model anyways, maybe not needed
++        if (chip_id == T8027)
++            return 0;
++
+         bail("ADT: Failed to get wifi-antenna-sku-info\n");
++    }
+ 
+     const char *path = fdt_get_alias(dt, "wifi0");
+     if (path == NULL)
+@@ -2310,6 +2334,37 @@ static int dt_transfer_virtios(void)
+     return 0;
+ }
+ 
++static int dt_set_pmgr(void)
++{
++    if (chip_id != T8012)
++        return 0;
++
++    if (mem_size_actual > 0x40000000)
++        return 0;
++
++    int pmgr_node = fdt_path_offset(dt, "/soc/power-management@20e000000");
++    if (pmgr_node < 0) {
++        printf("FDT: Failed to find pmgr node\n");
++        return 0;
++    }
++
++    int dcs2_node = fdt_path_offset(dt, "/soc/power-management@20e000000/power-controller@80258");
++    if (dcs2_node < 0)
++        bail("FDT: failed to find ps_dcs2 node\n");
++
++    /* Allow failure */
++    fdt_delprop(dt, dcs2_node, "apple,always-on");
++
++    int dcs3_node = fdt_path_offset(dt, "/soc/power-management@20e000000/power-controller@80260");
++    if (dcs3_node < 0)
++        bail("FDT: failed to find ps_dcs3 node\n");
++
++    /* Allow failure */
++    fdt_delprop(dt, dcs3_node, "apple,always-on");
++
++    return 0;
++}
++
+ void kboot_set_initrd(void *start, size_t size)
+ {
+     initrd_start = start;
+@@ -2495,6 +2550,8 @@ int kboot_prepare_dt(void *fdt)
+         return -1;
+     if (dt_set_isp_fwdata())
+         return -1;
++    if (dt_set_pmgr())
++        return -1;
+ #ifndef RELEASE
+     if (dt_transfer_virtios())
+         return 1;
+diff --git a/src/main.c b/src/main.c
+index 2f1a7cc..2f24d6c 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -50,7 +50,7 @@ void get_device_info(void)
+     if (target)
+         printf("  Target: %s\n", target);
+ 
+-    is_mac = !!strstr(model, "Mac");
++    is_mac = !!strstr(model, "Mac") || strncmp(model, "ADP3,", 5) == 0;
+     has_dcp = adt_path_offset(adt, "/arm-io/dcp") > 0;
+ 
+     int chosen = adt_path_offset(adt, "/chosen");
+diff --git a/src/memory.c b/src/memory.c
+index c88086e..9394bb6 100644
+--- a/src/memory.c
++++ b/src/memory.c
+@@ -380,8 +380,11 @@ static void mmu_map_mmio(void)
+         u64 bus = ranges[2] | ((u64)ranges[3] << 32);
+         u64 size = ranges[4] | ((u64)ranges[5] << 32);
+ 
+-        mmu_add_mapping(bus, bus, size, MAIR_IDX_DEVICE_nGnRnE, PERM_RW_EL0);
++        /* T2 is really stupid */
++        if (chip_id == T8012)
++            size = ALIGN_UP(size, PAGE_SIZE);
+ 
++        mmu_add_mapping(bus, bus, size, MAIR_IDX_DEVICE_nGnRnE, PERM_RW_EL0);
+         ranges += 6;
+     }
+ }
+diff --git a/src/pmgr.c b/src/pmgr.c
+index d78bc8e..7613e0d 100644
+--- a/src/pmgr.c
++++ b/src/pmgr.c
+@@ -341,6 +341,28 @@ int pmgr_reset(int die, const char *name)
+     return pmgr_reset_device(die, dev);
+ }
+ 
++int pmgr_power_on(int die, const char *name)
++{
++    const struct pmgr_device *dev = NULL;
++
++    for (unsigned int i = 0; i < pmgr_devices_len; ++i) {
++        if (strncmp(pmgr_devices[i].name, name, 0x10) == 0) {
++            dev = &pmgr_devices[i];
++            break;
++        }
++    }
++
++    if (!dev)
++        return -1;
++
++    uintptr_t addr = pmgr_device_get_addr(die, dev);
++
++    if (!addr)
++        return -1;
++
++    return pmgr_set_mode(addr, PMGR_PS_ACTIVE);
++}
++
+ int pmgr_init(void)
+ {
+     int node = adt_path_offset(adt, "/arm-io");
+diff --git a/src/pmgr.h b/src/pmgr.h
+index 3b61a57..ba2ca99 100644
+--- a/src/pmgr.h
++++ b/src/pmgr.h
+@@ -26,6 +26,7 @@ int pmgr_adt_power_disable_index(const char *path, u32 index);
+ int pmgr_adt_reset(const char *path);
+ 
+ int pmgr_reset(int die, const char *name);
++int pmgr_power_on(int die, const char *name);
+ 
+ int pmgr_set_mode(uintptr_t addr, u8 target_mode);
+ 
+diff --git a/src/proxy.c b/src/proxy.c
+index c59225c..b4c4a1a 100644
+--- a/src/proxy.c
++++ b/src/proxy.c
+@@ -90,7 +90,8 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+             break;
+         case P_VECTOR:
+             // forcefully restore tps6598x IRQs
+-            usb_hpm_restore_irqs(1);
++            if (usb_type == USB_TYPE_DWC3)
++                usb_hpm_restore_irqs(1);
+             iodev_console_flush();
+             next_stage.entry = (generic_func *)request->args[0];
+             memcpy(next_stage.args, &request->args[1], 5 * sizeof(u64));
+@@ -605,6 +606,10 @@ int proxy_process(ProxyRequest *request, ProxyReply *reply)
+             reply->retval = cpufreq_init();
+             break;
+ 
++        case P_CPUFREQ_UNRESTRICT_BOOST:
++            cpufreq_unrestrict_boost();
++            break;
++
+         default:
+             reply->status = S_BADCMD;
+             break;
+diff --git a/src/proxy.h b/src/proxy.h
+index 34c419e..b6b211b 100644
+--- a/src/proxy.h
++++ b/src/proxy.h
+@@ -173,6 +173,7 @@ typedef enum {
+     P_DAPF_INIT,
+ 
+     P_CPUFREQ_INIT = 0x1300,
++    P_CPUFREQ_UNRESTRICT_BOOST,
+ } ProxyOp;
+ 
+ #define S_OK     0
+diff --git a/src/smc.c b/src/smc.c
+index 3fee45a..67df7d6 100644
+--- a/src/smc.c
++++ b/src/smc.c
+@@ -2,6 +2,7 @@
+ 
+ #include "assert.h"
+ #include "malloc.h"
++#include "pmgr.h"
+ #include "smc.h"
+ #include "string.h"
+ #include "types.h"
+@@ -126,6 +127,12 @@ smc_dev_t *smc_init(void)
+     if (!smc)
+         return NULL;
+ 
++    if (chip_id == T8015 || chip_id == T8012) {
++        pmgr_power_on(0, "SMC_I2CM1");
++        pmgr_power_on(0, "SMC_FABRIC");
++        pmgr_adt_power_enable("/arm-io/smc");
++    }
++
+     smc->asc = asc_init("/arm-io/smc");
+     if (!smc->asc) {
+         printf("SMC: failed to initialize ASC\n");
+diff --git a/src/smp.c b/src/smp.c
+index 15ccc0e..02009c9 100644
+--- a/src/smp.c
++++ b/src/smp.c
+@@ -262,6 +262,7 @@ void smp_start_secondaries(void)
+         case T8011:
+         case T8012:
+         case T8015:
++        case T8027:
+             cpu_start_off = CPU_START_OFF_S8000;
+             break;
+         case T8103:
+diff --git a/src/soc.h b/src/soc.h
+index b6632ad..2f7a01d 100644
+--- a/src/soc.h
++++ b/src/soc.h
+@@ -16,6 +16,7 @@
+ #define T8012    0x8012
+ #define T8015    0x8015
+ 
++#define T8027 0x8027
+ #define T8103 0x8103
+ #define T8112 0x8112
+ #define T8122 0x8122
+@@ -35,7 +36,7 @@
+ #elif TARGET == T6000 || TARGET == T6001 || TARGET == T6002 || TARGET == T6020 ||                  \
+     TARGET == T6021 || TARGET == T6022
+ #define EARLY_UART_BASE 0x39b200000
+-#elif TARGET == T8112
++#elif TARGET == T8027 || TARGET == T8112
+ #define EARLY_UART_BASE 0x235200000
+ #elif TARGET == T6034 || TARGET == T6031
+ #define EARLY_UART_BASE 0x391200000
+diff --git a/src/startup.c b/src/startup.c
+index b0308c3..08476ff 100644
+--- a/src/startup.c
++++ b/src/startup.c
+@@ -134,7 +134,23 @@ void dump_boot_args(struct boot_args *ba)
+             break;
+     }
+     if (!mem_size_actual) {
+-        mem_size_actual = ALIGN_UP(ba->phys_base + ba->mem_size - 0x800000000, BIT(30));
++        if (chip_id == T8012) {
++            int anode = adt_path_offset(adt, "/arm-io/mcc");
++
++            /*
++             * Lower 512 MB intented for OS use, upper 512 or 1536 MB is some sort
++             * of SSD cache. Cannot use dram-size, it may not exist in older firmwares
++             * This property is changed from 4 to 2 by iBoot on 1 GB RAM models.
++             */
++
++            u32 dcs_num_channels = 0;
++            if (anode > 0 && ADT_GETPROP(adt, anode, "dcs_num_channels", &dcs_num_channels) > 0)
++                mem_size_actual = dcs_num_channels * 0x20000000;
++            else
++                mem_size_actual = 0x40000000;
++        } else {
++            mem_size_actual = ALIGN_UP(ba->phys_base + ba->mem_size - 0x800000000, BIT(30));
++        }
+         printf("Correcting mem_size_actual to 0x%lx\n", mem_size_actual);
+     }
+ }
+diff --git a/src/usb.c b/src/usb.c
+index 49d2767..4e19528 100644
+--- a/src/usb.c
++++ b/src/usb.c
+@@ -7,9 +7,12 @@
+ #include "iodev.h"
+ #include "malloc.h"
+ #include "pmgr.h"
++#include "soc.h"
+ #include "string.h"
+ #include "tps6598x.h"
+ #include "types.h"
++#include "usb_complex.h"
++#include "usb_dwc2.h"
+ #include "usb_dwc3.h"
+ #include "usb_dwc3_regs.h"
+ #include "utils.h"
+@@ -35,6 +38,7 @@ struct usb_drd_regs {
+ 
+ static tps6598x_irq_state_t tps6598x_irq_state[USB_IODEV_COUNT];
+ static bool usb_is_initialized = false;
++usb_type_t usb_type = USB_TYPE_DWC3;
+ 
+ static dart_dev_t *usb_dart_init(u32 idx)
+ {
+@@ -147,67 +151,66 @@ dwc3_dev_t *usb_iodev_bringup(u32 idx)
+     return usb_dwc3_init(usb_reg.drd_regs, usb_dart);
+ }
+ 
+-#define USB_IODEV_WRAPPER(name, pipe)                                                              \
+-    static ssize_t usb_##name##_can_read(void *dev)                                                \
++#define USB_IODEV_WRAPPER(driver, name, pipe)                                                      \
++    static ssize_t usb_##driver##_##name##_can_read(void *dev)                                     \
+     {                                                                                              \
+-        return usb_dwc3_can_read(dev, pipe);                                                       \
++        return usb_##driver##_can_read(dev, pipe);                                                 \
+     }                                                                                              \
+                                                                                                    \
+-    static bool usb_##name##_can_write(void *dev)                                                  \
++    static bool usb_##driver##_##name##_can_write(void *dev)                                       \
+     {                                                                                              \
+-        return usb_dwc3_can_write(dev, pipe);                                                      \
++        return usb_##driver##_can_write(dev, pipe);                                                \
+     }                                                                                              \
+                                                                                                    \
+-    static ssize_t usb_##name##_read(void *dev, void *buf, size_t count)                           \
++    static ssize_t usb_##driver##_##name##_read(void *dev, void *buf, size_t count)                \
+     {                                                                                              \
+-        return usb_dwc3_read(dev, pipe, buf, count);                                               \
++        return usb_##driver##_read(dev, pipe, buf, count);                                         \
+     }                                                                                              \
+                                                                                                    \
+-    static ssize_t usb_##name##_write(void *dev, const void *buf, size_t count)                    \
++    static ssize_t usb_##driver##_##name##_write(void *dev, const void *buf, size_t count)         \
+     {                                                                                              \
+-        return usb_dwc3_write(dev, pipe, buf, count);                                              \
++        return usb_##driver##_write(dev, pipe, buf, count);                                        \
+     }                                                                                              \
+                                                                                                    \
+-    static ssize_t usb_##name##_queue(void *dev, const void *buf, size_t count)                    \
++    static ssize_t usb_##driver##_##name##_queue(void *dev, const void *buf, size_t count)         \
+     {                                                                                              \
+-        return usb_dwc3_queue(dev, pipe, buf, count);                                              \
++        return usb_##driver##_queue(dev, pipe, buf, count);                                        \
+     }                                                                                              \
+                                                                                                    \
+-    static void usb_##name##_handle_events(void *dev)                                              \
++    static void usb_##driver##_##name##_handle_events(void *dev)                                   \
+     {                                                                                              \
+-        usb_dwc3_handle_events(dev);                                                               \
++        usb_##driver##_handle_events(dev);                                                         \
+     }                                                                                              \
+                                                                                                    \
+-    static void usb_##name##_flush(void *dev)                                                      \
++    static void usb_##driver##_##name##_flush(void *dev)                                           \
+     {                                                                                              \
+-        usb_dwc3_flush(dev, pipe);                                                                 \
++        usb_##driver##_flush(dev, pipe);                                                           \
+     }
+ 
+-USB_IODEV_WRAPPER(0, CDC_ACM_PIPE_0)
+-USB_IODEV_WRAPPER(1, CDC_ACM_PIPE_1)
+-
+-static struct iodev_ops iodev_usb_ops = {
+-    .can_read = usb_0_can_read,
+-    .can_write = usb_0_can_write,
+-    .read = usb_0_read,
+-    .write = usb_0_write,
+-    .queue = usb_0_queue,
+-    .flush = usb_0_flush,
+-    .handle_events = usb_0_handle_events,
+-};
++USB_IODEV_WRAPPER(dwc2, 0, CDC_ACM_PIPE_0)
++USB_IODEV_WRAPPER(dwc2, 1, CDC_ACM_PIPE_1)
+ 
+-static struct iodev_ops iodev_usb_sec_ops = {
+-    .can_read = usb_1_can_read,
+-    .can_write = usb_1_can_write,
+-    .read = usb_1_read,
+-    .write = usb_1_write,
+-    .queue = usb_1_queue,
+-    .flush = usb_1_flush,
+-    .handle_events = usb_1_handle_events,
+-};
++USB_IODEV_WRAPPER(dwc3, 0, CDC_ACM_PIPE_0)
++USB_IODEV_WRAPPER(dwc3, 1, CDC_ACM_PIPE_1)
++
++#define USB_IODEV_OPS(driver, name, pipe)                                                          \
++    {                                                                                              \
++        .can_read = usb_##driver##_##name##_can_read,                                              \
++        .can_write = usb_##driver##_##name##_can_write,                                            \
++        .read = usb_##driver##_##name##_read,                                                      \
++        .write = usb_##driver##_##name##_write,                                                    \
++        .queue = usb_##driver##_##name##_queue,                                                    \
++        .flush = usb_##driver##_##name##_flush,                                                    \
++        .handle_events = usb_##driver##_##name##_handle_events,                                    \
++    }
++
++static struct iodev_ops iodev_usb_dwc2_ops = USB_IODEV_OPS(dwc2, 0, CDC_ACM_PIPE_0);
++static struct iodev_ops iodev_usb_dwc2_sec_ops = USB_IODEV_OPS(dwc2, 1, CDC_ACM_PIPE_1);
++
++static struct iodev_ops iodev_usb_dwc3_ops = USB_IODEV_OPS(dwc3, 0, CDC_ACM_PIPE_0);
++static struct iodev_ops iodev_usb_dwc3_sec_ops = USB_IODEV_OPS(dwc3, 1, CDC_ACM_PIPE_1);
+ 
+ struct iodev iodev_usb_vuart = {
+-    .ops = &iodev_usb_sec_ops,
+     .usage = 0,
+     .lock = SPINLOCK_INIT,
+ };
+@@ -237,6 +240,137 @@ void usb_spmi_init(void)
+     usb_is_initialized = true;
+ }
+ 
++int usb_complex_init(void)
++{
++    // bring_up, we do have one usb port
++    int otgphyctrl_path[8], usbComplex_path[8];
++    u64 USBComplexBase, USBComplex_OTGBase = 0, DWC2Base;
++
++    usb_type = USB_TYPE_DWC2;
++
++    adt_path_offset_trace(adt, "/arm-io/usb-complex", usbComplex_path);
++
++    int otgctl_offset = adt_path_offset_trace(adt, "/arm-io/otgphyctrl", otgphyctrl_path);
++
++    for (uint32_t i = 0, max = 2; i < max; ++i) {
++        u64 ctlsize, ctlbase;
++        if (adt_get_reg(adt, otgphyctrl_path, "reg", i, &ctlbase, &ctlsize) < 0) {
++            printf("usb: failed to get /arm-io/otgphyctrl reg\n");
++            return -1;
++        }
++        if (ctlsize == 0x20) {
++            USBComplex_OTGBase = ctlbase;
++            break;
++        }
++    }
++
++    if (!USBComplex_OTGBase) {
++        printf("usb: failed to parse /arm-io/otgphyctrl reg\n");
++        return -1;
++    }
++
++    if (adt_get_reg(adt, usbComplex_path, "reg", 0, &USBComplexBase, NULL) < 0) {
++        printf("usb: Error getting USBComplexBase Reg\n");
++        return -1;
++    }
++
++    // Can't trust ADT /arm-io/usb-complex/usb-device , it is some usb3 on A10X and we want dwc2
++    DWC2Base = (USBComplex_OTGBase & ~0xfffULL) + 0x00100000;
++
++    // USB complex
++    pmgr_power_on(0, "USB");
++
++    // USB complex OTG control registers
++    pmgr_power_on(0, "USBCTLREG");
++    pmgr_power_on(0, "USBCTRL");
++
++    // DWC2 device
++    pmgr_power_on(0, "USBOTG");
++    pmgr_power_on(0, "USBDEV");
++    pmgr_power_on(0, "USB2DEV");
++
++    pmgr_reset(0, "USB");
++
++    pmgr_reset(0, "USBCTLREG");
++    pmgr_reset(0, "USBCTRL");
++
++    pmgr_reset(0, "USBOTG");
++    pmgr_reset(0, "USBDEV");
++    pmgr_reset(0, "USB2DEV");
++
++    u32 cfg0, cfg1;
++    if (ADT_GETPROP(adt, otgctl_offset, "cfg0-device", &cfg0) < 0) {
++        printf("usb: Error getting CFG0 from otgctl \n");
++        return -1;
++    }
++    if (ADT_GETPROP(adt, otgctl_offset, "cfg1-device", &cfg1) < 0) {
++        printf("usb: Error getting CFG1 from otgctl \n");
++        return -1;
++    }
++
++    // Derived from ADT usb_widget, however that property is not usable as-is
++    switch (chip_id) {
++        case T8011:
++            write32(USBComplexBase + USBX_CTL_T8011, USBX_CTL_EN_T8011);
++            write32(USBComplexBase + USBX_USB2DEV_REMAP_CTL_T8011, USBX_REMAP_TO_DRAM_BITS_T8011);
++            break;
++        case T8015:
++            write32(USBComplexBase + USBX_CTL_T8011, USBX_CTL_EN_T8011);
++            write32(USBComplexBase + USBX_EHCI0_REMAP_CTL_T8015, USBX_REMAP_TO_DRAM_BITS_T8011);
++            write32(USBComplexBase + USBX_OHCI0_REMAP_CTL_T8015, USBX_REMAP_TO_DRAM_BITS_T8011);
++            write32(USBComplexBase + USBX_EHCI1_REMAP_CTL_T8015, USBX_REMAP_TO_DRAM_BITS_T8011);
++            write32(USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015, USBX_REMAP_TO_DRAM_BITS_T8011);
++            break;
++        case S5L8960X:
++            write32(USBComplexBase + USBX_EHCI0_REMAP_CTL_S5L8960X,
++                    USBX_REMAP_TO_DRAM_BITS_S5L8960X);
++            write32(USBComplexBase + USBX_EHCI1_REMAP_CTL_S5L8960X,
++                    USBX_REMAP_TO_DRAM_BITS_S5L8960X);
++            /* fallthrough */
++        default:
++            write32(USBComplexBase + USBX_USBDEV_REMAP_CTL_S5L8960X,
++                    USBX_REMAP_TO_DRAM_BITS_S5L8960X);
++            write32(USBComplexBase + USBX_OHCI0_REMAP_CTL_S5L8960X,
++                    USBX_REMAP_TO_DRAM_BITS_S5L8960X);
++            break;
++    }
++    write32(USBComplex_OTGBase + USBX_OTG_CFG0, cfg0);
++    write32(USBComplex_OTGBase + USBX_OTG_CFG1, cfg1);
++
++    set32(USBComplex_OTGBase + USBX_OTG_CTL, USBX_OTG_CTL_RESET);
++
++    udelay(20);
++    clear32(USBComplex_OTGBase + USBX_OTG_CTL, USBX_OTG_CTL_PWRDOWN | USBX_OTG_CTL_SIDDQ);
++    udelay(20);
++    clear32(USBComplex_OTGBase + USBX_OTG_CTL, USBX_OTG_CTL_RESET);
++    udelay(20);
++    clear32(USBComplex_OTGBase + USBX_OTG_SIG, USBX_OTG_SIG_VBUSDET_FORCE_EN);
++    udelay(1500);
++
++    dwc2_dev_t *opaque;
++    struct iodev *usb_iodev;
++
++    opaque = usb_dwc2_init(DWC2Base);
++    if (!opaque)
++        return -1;
++
++    usb_iodev = memalign(SPINLOCK_ALIGN, sizeof(*usb_iodev));
++    if (!usb_iodev)
++        return -1;
++    set32(USBComplex_OTGBase + USBX_OTG_SIG, USBX_OTG_SIG_VBUSDET_FORCE_EN);
++    usb_iodev->ops = &iodev_usb_dwc2_ops;
++    usb_iodev->opaque = opaque;
++    usb_iodev->usage = USAGE_CONSOLE | USAGE_UARTPROXY;
++    spin_init(&usb_iodev->lock);
++
++    iodev_register_device(IODEV_USB0, usb_iodev);
++    printf("USB0: initialized at %p\n", opaque);
++
++    usb_is_initialized = true;
++
++    return 0;
++}
++
+ void usb_init(void)
+ {
+     char hpm_path[sizeof(FMT_HPM_PATH)];
+@@ -254,12 +388,12 @@ void usb_init(void)
+     }
+ 
+     /*
+-     * A7-A11 uses a custom internal otg controller with the peripheral part
+-     * being dwc2.
++     * A7-A11 uses a custom internal otg phy with the peripheral part
++     * being dwc2, role switch seems custom.
+      */
+     if (adt_path_offset(adt, "/arm-io/otgphyctrl") > 0 &&
+         adt_path_offset(adt, "/arm-io/usb-complex") > 0) {
+-        /* We do not support the custom controller and dwc2 (yet). */
++        usb_complex_init();
+         return;
+     }
+ 
+@@ -327,6 +461,10 @@ void usb_hpm_restore_irqs(bool force)
+ 
+ void usb_iodev_init(void)
+ {
++    if (adt_path_offset(adt, "/arm-io/otgphyctrl") > 0 &&
++        adt_path_offset(adt, "/arm-io/usb-complex") > 0) {
++        return; // already init in usb_init() since we do have only 1 usb port
++    }
+     for (int i = 0; i < USB_IODEV_COUNT; i++) {
+         dwc3_dev_t *opaque;
+         struct iodev *usb_iodev;
+@@ -339,7 +477,7 @@ void usb_iodev_init(void)
+         if (!usb_iodev)
+             continue;
+ 
+-        usb_iodev->ops = &iodev_usb_ops;
++        usb_iodev->ops = &iodev_usb_dwc3_ops;
+         usb_iodev->opaque = opaque;
+         usb_iodev->usage = USAGE_CONSOLE | USAGE_UARTPROXY;
+         spin_init(&usb_iodev->lock);
+@@ -357,7 +495,13 @@ void usb_iodev_shutdown(void)
+             continue;
+ 
+         printf("USB%d: shutdown\n", i);
+-        usb_dwc3_shutdown(usb_iodev->opaque);
++        if (adt_path_offset(adt, "/arm-io/otgphyctrl") > 0 &&
++            adt_path_offset(adt, "/arm-io/usb-complex") > 0) {
++            usb_dwc2_shutdown(usb_iodev->opaque);
++            return;
++        } else {
++            usb_dwc3_shutdown(usb_iodev->opaque);
++        }
+         free(usb_iodev);
+     }
+ }
+@@ -367,5 +511,7 @@ void usb_iodev_vuart_setup(iodev_id_t iodev)
+     if (iodev < IODEV_USB0 || iodev >= IODEV_USB0 + USB_IODEV_COUNT)
+         return;
+ 
++    iodev_usb_vuart.ops =
++        usb_type == USB_TYPE_DWC2 ? &iodev_usb_dwc2_sec_ops : &iodev_usb_dwc3_sec_ops;
+     iodev_usb_vuart.opaque = iodev_get_opaque(iodev);
+ }
+diff --git a/src/usb.h b/src/usb.h
+index 1ba859a..28cb3ed 100644
+--- a/src/usb.h
++++ b/src/usb.h
+@@ -7,6 +7,8 @@
+ #include "types.h"
+ #include "usb_dwc3.h"
+ 
++extern usb_type_t usb_type;
++
+ dwc3_dev_t *usb_bringup(u32 idx);
+ 
+ void usb_init(void);
+diff --git a/src/usb_dwc3.h b/src/usb_dwc3.h
+index 6b23c7c..b4e1839 100644
+--- a/src/usb_dwc3.h
++++ b/src/usb_dwc3.h
+@@ -5,15 +5,10 @@
+ 
+ #include "dart.h"
+ #include "types.h"
++#include "usb_types.h"
+ 
+ typedef struct dwc3_dev dwc3_dev_t;
+ 
+-typedef enum _cdc_acm_pipe_id_t {
+-    CDC_ACM_PIPE_0,
+-    CDC_ACM_PIPE_1,
+-    CDC_ACM_PIPE_MAX
+-} cdc_acm_pipe_id_t;
+-
+ dwc3_dev_t *usb_dwc3_init(uintptr_t regs, dart_dev_t *dart);
+ void usb_dwc3_shutdown(dwc3_dev_t *dev);
+ 
+diff --git a/src/usb_types.h b/src/usb_types.h
+index 86fa8c1..188e323 100644
+--- a/src/usb_types.h
++++ b/src/usb_types.h
+@@ -41,6 +41,14 @@
+ #define USB_REQUEST_CDC_GET_LINE_CODING     0x21
+ #define USB_REQUEST_CDC_SET_CTRL_LINE_STATE 0x22
+ 
++typedef enum _cdc_acm_pipe_id_t {
++    CDC_ACM_PIPE_0,
++    CDC_ACM_PIPE_1,
++    CDC_ACM_PIPE_MAX
++} cdc_acm_pipe_id_t;
++
++typedef enum _usb_type_t { USB_TYPE_DWC2, USB_TYPE_DWC3 } usb_type_t;
++
+ struct usb_setup_packet_raw {
+     u8 bmRequestType;
+     u8 bRequest;
+diff --git a/src/utils.h b/src/utils.h
+index 28403b6..734c996 100644
+--- a/src/utils.h
++++ b/src/utils.h
+@@ -454,6 +454,18 @@ static inline int poll32(u64 addr, u32 mask, u32 target, u32 timeout)
+     return -1;
+ }
+ 
++static inline int poll64(u64 addr, u64 mask, u64 target, u32 timeout)
++{
++    while (--timeout > 0) {
++        u32 value = read64(addr) & mask;
++        if (value == target)
++            return 0;
++        udelay(1);
++    }
++
++    return -1;
++}
++
+ typedef u64(generic_func)(u64, u64, u64, u64, u64);
+ 
+ struct vector_args {
