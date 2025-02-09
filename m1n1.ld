@@ -7,6 +7,7 @@ _va_base = 0xFFFFFE0007004000;
 _base = 0;
 
 _stack_size = 0x20000;
+_stack_size_el3 = 0x8000;
 
 . = _base;
 
@@ -146,6 +147,10 @@ SECTIONS {
         *(.bss.*)
         *(.dynbss)
         *(COMMON)
+        . = ALIGN(0x8000);
+        PROVIDE(_stack_top_el3 = .);
+        . += _stack_size_el3;
+        PROVIDE(_stack_bot_el3 = .);
         . = ALIGN(0x8000);
         PROVIDE(_stack_top = .);
         . += _stack_size;
